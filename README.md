@@ -174,6 +174,7 @@ Real, two-way Twitch chat — no iframe. The server holds **one IRC-over-TLS con
 Implemented in `server/chat.js` (IRC bridge + pure IRC parsing helpers), `server/emotes.js` (BTTV/7TV emote service) and `web/js/chat.js` (the panel); the same module is mounted as the focused-tile chat in Multiview.
 
 | **Chat** | **Chat Multiview** |
+|:---:|:---:|
 | ![Chat — Emotes w/ BTTV & 7TV](docs/screenshots/chat.png) | ![Chat Multview — Focused Chat](docs/screenshots/chat-multi.png) |
 
 ### Multiview
