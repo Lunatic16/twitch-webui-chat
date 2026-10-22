@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Twitch WebUI</title>
+  <link rel="icon" type="image/png" sizes="16x16" href="/favicon.png">
+  <link rel="apple-touch-icon" href="/favicon.png">
+  <link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+  <a class="skip" href="#view">Skip to content</a>
+  <div class="app">
+    <nav class="sidebar" id="sidebar" aria-label="Main">
+      <a class="brand" href="/" data-link><span class="brand-mark" aria-hidden="true"></span><span class="brand-text">Twitch WebUI</span></a>
+      <div class="nav" id="nav"></div>
+    </nav>
+    <div class="main">
+      <header class="topbar">
+        <button class="icon-btn menu-btn" id="menuBtn" aria-label="Hide navigation" aria-expanded="true" aria-controls="sidebar" title="Hide / show menu"></button>
+        <form class="omnibox" id="omnibox" role="search">
+          <span class="omni-icon" id="omniIcon" aria-hidden="true"></span>
+          <input id="omniInput" type="text" placeholder="Play a channel or paste any twitch.tv URL  ( / )" aria-label="Play channel or URL" autocomplete="off" spellcheck="false">
+          <button class="btn primary sm" type="submit">Play</button>
+        </form>
+        <button class="icon-btn" id="debugBtn" aria-label="Debug log" hidden></button>
+        <button class="user-btn" id="userBtn" aria-haspopup="dialog"></button>
+      </header>
+      <div id="banner" class="banner-slot" aria-live="polite"></div>
+      <main id="view" tabindex="-1"></main>
+    </div>
+  </div>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+  <div id="modalRoot"></div>
+  <aside id="debugDrawer" class="drawer" hidden aria-label="Debug log"></aside>
+  <script src="/vendor/hls.js"></script>
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,25 @@
+# Twitch WebUI — container deployment.
+#   docker compose up -d --build          → http://localhost:3010
+#   TWITCH_WEBUI_PORT=3011 docker compose up -d --build   (host port override)
+#   docker compose logs -f / docker compose down
+#
+# Tokens and settings live in the bind-mounted ~/.config/twitch-webui, shared
+# with a native install and preserved across rebuilds.
+#
+# GOTCHA (do not "clean up" this file): an `environment:` key with only
+# comments under it parses as null → "environment must be a mapping".
+# The whole block stays commented; uncomment the key together with its entries.
+services:
+  twitch-webui:
+    build: .
+    image: twitch-webui-chat:latest
+    container_name: twitch-webui-chat
+    ports:
+      - "${TWITCH_WEBUI_PORT:-3010}:3010"
+    volumes:
+      - ~/.config/twitch-webui:/home/node/.config/twitch-webui:Z
+    restart: unless-stopped
+    # environment:
+    #   TWITCH_TOKEN: <oauth token>              # overrides the stored token
+    #   TWITCH_WEB_AUTH_TOKEN: <auth-token cookie>  # web-login playback mode
+    #   ACCESS_PIN: <pin>                        # required if LAN-reachable
