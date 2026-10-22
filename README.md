@@ -175,7 +175,7 @@ Implemented in `server/chat.js` (IRC bridge + pure IRC parsing helpers), `server
 
 | **Chat** | **Chat Multiview** |
 |:---:|:---:|
-| ![Chat — Emotes w/ BTTV & 7TV](docs/screenshots/chat.png) | ![Chat Multview — Focused Chat](docs/screenshots/chat-multi.png) |
+| ![Chat — Emotes w/ BTTV & 7TV](docs/screenshots/chat.png) | ![Chat Multview — Focused Chat](docs/screenshots/chat-muti.png) |
 
 ### Multiview
 
