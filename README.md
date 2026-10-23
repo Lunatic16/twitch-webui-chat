@@ -21,6 +21,7 @@
 - 💬 **Native chat** — real two-way IRC chat with badges, BTTV/7TV emotes (incl. zero-width stacking) and mention highlighting, in a viewport-fitting panel for watch & multiview
 - 💻 **Multiview wall** — 2 / 4 / 6 tiles, grid & featured layouts, presets, drag-and-drop, shareable URLs
 - 🔑 **Full OAuth flow** — QR-code login, token validation, optional OS keyring storage
+- 🖥️ **1440p60 Streams** | Picks up streams that offer 1440p60 or other high-quality source renditions when a browser session web token is provided.
 - 🔍 **Browse & playback** — followed-live, categories, channel search, VODs, clips, audio-only
 - 🩺 **Diagnostics** — per-flavor rendition tables, token-mode status, failure reasons
 - 🐳 **Docker-ready** — `docker compose up -d --build` and you're live; healthcheck included, config survives rebuilds
@@ -64,6 +65,18 @@ Tokens are validated via `oauth2/validate` and stored at `~/.config/twitch-webui
 
 > [!TIP]
 > Port **3010** is the default, matching the spec. If another app (e.g. the older `twitch-webui-chatgpt` build) is already on 3010, run `PORT=3011 npm start`.
+
+## 🖥️ Higher Quality Streams (Source / 1440p60)
+
+Some channels stream above 1080p60 (for example a 1440p60 source). Twitch only offers those renditions to a logged-in **web** session, so without one you will only see up to 1080p or just lower 720p60 even though the stream has more. The login created by `--login` is *not* accepted for playback tokens (Twitch answers `401 Unauthorized`), so these streams need the browser session token as well.
+
+**1. Copy your browser's `auth-token` cookie**
+
+In your browser, while logged in to twitch.tv: open DevTools → *Application* (Chrome) or *Storage* (Firefox) → *Cookies* → `https://www.twitch.tv` → copy the value of the cookie named `auth-token`.
+
+**2. Save Web Auth Token**
+
+Navigate back to the App Settings →  Scroll to the bottom of settings → Paste the token value → Save
 
 ## 🐳 Docker
 
