@@ -21,7 +21,7 @@
 - 💬 **Native chat** — real two-way IRC chat with badges, BTTV/7TV emotes (incl. zero-width stacking) and mention highlighting, in a viewport-fitting panel for watch & multiview
 - 💻 **Multiview wall** — 2 / 4 / 6 tiles, grid & featured layouts, presets, drag-and-drop, shareable URLs
 - 🔑 **Full OAuth flow** — QR-code login, token validation, optional OS keyring storage
-- 🖥️ **1440p60 Streams** | Picks up streams that offer 1440p60 or other high-quality source renditions when a browser session web token is provided.
+- 🖥️ **1440p60 Streams** — Picks up streams that offer 1440p60 or other high-quality source renditions when a browser session web token is provided.
 - 🔍 **Browse & playback** — followed-live, categories, channel search, VODs, clips, audio-only
 - 🩺 **Diagnostics** — per-flavor rendition tables, token-mode status, failure reasons
 - 🐳 **Docker-ready** — `docker compose up -d --build` and you're live; healthcheck included, config survives rebuilds
