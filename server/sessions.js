@@ -46,9 +46,16 @@ export class Session extends EventEmitter {
  * still apply quality selection and rewrite URIs so the browser can fetch them.
  */
 export class PassthroughProxy {
-  constructor({ twitch, masterUrl, quality, allowedCodecs, onEvent, wrap }) {
+  /**
+   * @param {string} [o.masterUrl]  single master playlist (live, no ad-block)
+   * @param {{url:string, mode:string}[]} [o.sources]  VODs: tried in order until one
+   *   answers, so a rejected web token falls back to the anonymous one
+   */
+  constructor({ twitch, masterUrl, sources, quality, allowedCodecs, onEvent, wrap }) {
     this.twitch = twitch;
-    this.masterUrl = masterUrl;
+    this.sources = sources?.length ? sources : [{ url: masterUrl, mode: null }];
+    this.masterUrl = this.sources[0].url;
+    this.mode = this.sources[0].mode;
     this.quality = quality;
     this.allowedCodecs = allowedCodecs;
     this.onEvent = onEvent;
@@ -57,7 +64,17 @@ export class PassthroughProxy {
   }
 
   async buildMaster() {
-    const text = await this.twitch.fetchText(this.masterUrl);
+    let text = null;
+    for (const [i, src] of this.sources.entries()) {
+      text = await this.twitch.fetchText(src.url);
+      if (!text) {
+        if (i + 1 < this.sources.length) this.onEvent('warn', `${src.mode ?? 'Primary'} playlist was rejected; falling back to ${this.sources[i + 1].mode ?? 'the next source'}`);
+        continue;
+      }
+      this.masterUrl = src.url;
+      this.mode = src.mode;
+      break;
+    }
     if (!text) return { code: 502, body: 'could not fetch master playlist' };
 
     let variants = parseMasterVariants(text);
@@ -73,8 +90,8 @@ export class PassthroughProxy {
     const media = parseMasterMedia(text).map((l) => rewritePlaylist(l, this.masterUrl, this.wrap));
     const ordered = [chosen, ...variants.filter((v) => v !== chosen && v.bandwidth <= chosen.bandwidth)];
     const label = variantLabel(chosen);
-    this.info = { chosenKey: variantKey(chosen), chosenLabel: label, family: codecFamily(chosen), flavor: null, variants: describeVariants(ordered) };
-    this.onEvent('info', `Serving '${label}' (no ad filtering)`);
+    this.info = { chosenKey: variantKey(chosen), chosenLabel: label, family: codecFamily(chosen), flavor: this.mode, variants: describeVariants(ordered) };
+    this.onEvent('info', `Serving '${label}' (no ad filtering${this.mode ? `, ${this.mode} token` : ''})`);
     return { code: 200, body: renderMaster(variants, media, chosen, (v) => this.wrap(abs(v.uri))) };
   }
 

@@ -9,7 +9,7 @@ import { sleep } from './ui.js';
 
 const Hls = window.Hls;
 const all = new Set();
-window.addEventListener('pagehide', () => all.forEach((p) => p.releaseSession()));
+window.addEventListener('pagehide', () => all.forEach((p) => { p.flushProgress(); p.releaseSession(); }));
 
 const levelUri = (l) => l.uri || (Array.isArray(l.url) ? l.url[l.urlId || 0] : l.url) || '';
 export function levelKey(level) {
@@ -81,16 +81,26 @@ export class StreamPlayer extends EventTarget {
     this.recoveries = [];
     this.active = true;
     this.paused = false;
+    // VOD resume: where this session started from, and bookkeeping for saving progress.
+    this.resumedAt = null; // seconds, when playback was resumed from a saved position
+    this._startAt = null;
+    this._recoverPos = null;
+    this._played = false;  // don't save until playback really started (the resume seek has happened)
+    this._savedPos = -1;
+    this._ticks = 0;
 
     const v = this.video;
     v.addEventListener('waiting', () => this._buffering(true));
-    v.addEventListener('playing', () => { this._buffering(false); this._setState('playing'); });
+    v.addEventListener('playing', () => { this._played = true; this._buffering(false); this._setState('playing'); });
     v.addEventListener('canplay', () => this._buffering(false));
-    v.addEventListener('pause', () => this._emit('stats', this.stats()));
+    v.addEventListener('pause', () => { this._saveProgress(); this._emit('stats', this.stats()); });
     v.addEventListener('volumechange', () => this._emit('volume', { muted: v.muted, volume: v.volume }));
     v.addEventListener('ended', () => this._onEnded());
     v.addEventListener('error', () => { if (this.meta?.type === 'mp4' && v.error) this._fail(new Error('Could not play this clip')); });
-    this.timer = setInterval(() => { if (this.state === 'playing' || this.state === 'buffering') this._emit('stats', this.stats()); }, 1000);
+    this.timer = setInterval(() => {
+      if (this.state === 'playing' || this.state === 'buffering') this._emit('stats', this.stats());
+      if (this.state === 'playing' && ++this._ticks % 10 === 0) this._saveProgress(); // VOD: every ~10 s
+    }, 1000);
     all.add(this);
   }
 
@@ -107,6 +117,12 @@ export class StreamPlayer extends EventTarget {
 
   // ---- public API ------------------------------------------------------
   async start(input, opts = {}, isRecovery = false) {
+    // Reloading the same VOD (reload button, recovery, quality/ad-block toggles)
+    // continues from where the viewer is, not from the last saved position.
+    this._recoverPos = this.meta?.kind === 'vod' && input === this.input && this._played && this.video.readyState > 0 ? this.video.currentTime : null;
+    this._saveProgress();
+    this._played = false;
+    this._savedPos = -1;
     this._teardown();
     this.input = input;
     this.opts = { ...this.opts, ...opts };
@@ -142,6 +158,12 @@ export class StreamPlayer extends EventTarget {
     this.meta = meta;
     if (meta.status === 'offline') { this._setState('offline'); this._emit('meta', meta); return; }
 
+    // VOD: resume from the saved position (the server merged this app's record with Twitch's).
+    const isVod = meta.kind === 'vod';
+    this._startAt = isVod ? (this._recoverPos ?? meta.resume?.position ?? null) : null;
+    this.resumedAt = isVod && this._recoverPos == null ? (meta.resume?.position ?? null) : null;
+    this._recoverPos = null;
+
     this.sessionId = meta.sessionId;
     this._emit('meta', meta);
     if (meta.sessionId) this._openEvents(meta.sessionId);
@@ -150,6 +172,7 @@ export class StreamPlayer extends EventTarget {
 
   stop() {
     this.gen++;
+    this._saveProgress();
     this._teardown();
     this.meta = null;
     this._setState('idle');
@@ -169,6 +192,34 @@ export class StreamPlayer extends EventTarget {
     this._applyPolicy(false);
     this._emit('stats', this.stats());
   }
+
+  /** VOD: discard the resume position and play from the beginning. */
+  startOver() {
+    const m = this.meta;
+    this.resumedAt = null;
+    this.video.currentTime = 0;
+    if (m?.kind === 'vod' && m.vodId) {
+      this._savedPos = -1;
+      fetch(`/api/vod/${m.vodId}/progress`, { method: 'DELETE', keepalive: true }).catch(() => {});
+    }
+  }
+
+  /** VOD: persist the playback position (server keeps it for "resume where you left off"). */
+  _saveProgress() {
+    const m = this.meta;
+    if (m?.kind !== 'vod' || !m.vodId || !this._played) return;
+    const v = this.video;
+    const pos = v.currentTime;
+    if (!Number.isFinite(pos) || v.readyState === 0 || pos === this._savedPos) return;
+    this._savedPos = pos;
+    const dur = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : (m.durationSeconds || 0);
+    fetch(`/api/vod/${m.vodId}/progress`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, keepalive: true,
+      body: JSON.stringify({ position: Math.floor(pos), duration: Math.floor(dur) }),
+    }).catch(() => {});
+  }
+
+  flushProgress() { this._saveProgress(); }
 
   setMuted(m) { this.video.muted = !!m; }
   setVolume(v) { this.video.volume = Math.min(1, Math.max(0, v)); if (v > 0) this.video.muted = false; }
@@ -254,7 +305,8 @@ export class StreamPlayer extends EventTarget {
     }
 
     if (Hls?.isSupported()) {
-      const low = !!(o.lowLatency ?? s.lowLatency);
+      const low = !!(o.lowLatency ?? s.lowLatency) && meta.kind !== 'vod';
+      const isVod = meta.kind === 'vod';
       const hls = new Hls({
         lowLatencyMode: low,
         enableWorker: true,
@@ -263,9 +315,12 @@ export class StreamPlayer extends EventTarget {
         // Keep played data so the user can rewind (live DVR) without refetching.
         backBufferLength: this.mode === 'tile' ? 30 : (meta.kind === 'live' ? 300 : 60),
         liveSyncDurationCount: low ? 2 : 3,
-        liveMaxLatencyDurationCount: low ? 5 : 10,
-        maxLiveSyncPlaybackRate: low ? 1.15 : 1,
+        // A VOD of a stream that is still live has no end marker, so hls.js would treat it as
+        // live: never snap to the live edge or chase it; start at the resume point (or 0).
+        liveMaxLatencyDurationCount: isVod ? Infinity : (low ? 5 : 10),
+        maxLiveSyncPlaybackRate: isVod ? 1 : (low ? 1.15 : 1),
         autoStartLoad: this.active,
+        startPosition: isVod ? (this._startAt ?? 0) : -1, // VOD: resume point or the beginning
       });
       this.hls = hls;
       this._dvrBase = { maxLat: hls.config.liveMaxLatencyDurationCount, rate: hls.config.maxLiveSyncPlaybackRate };
@@ -278,6 +333,7 @@ export class StreamPlayer extends EventTarget {
       this._play();
     } else if (v.canPlayType('application/vnd.apple.mpegurl')) {
       v.src = url; // Safari: native HLS
+      if (this._startAt) { const at = this._startAt; v.addEventListener('loadedmetadata', () => { v.currentTime = at; }, { once: true }); }
       this._play();
     } else {
       this._fail(new Error('This browser cannot play HLS streams'));
@@ -319,8 +375,12 @@ export class StreamPlayer extends EventTarget {
   }
 
   _onEnded() {
-    if (this.meta?.kind === 'live') this._recover('stream ended');
-    else this._emit('ended');
+    if (this.meta?.kind === 'live') { this._recover('stream ended'); return; }
+    if (this.meta?.kind === 'vod' && this.meta.vodId) {
+      this._savedPos = -1;
+      fetch(`/api/vod/${this.meta.vodId}/progress`, { method: 'DELETE', keepalive: true }).catch(() => {}); // finished: next time starts over
+    }
+    this._emit('ended');
   }
 
   /** Check whether the channel is offline; otherwise rebuild with a fresh proxy session. */

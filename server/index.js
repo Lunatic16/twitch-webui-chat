@@ -16,6 +16,7 @@ import { TokenStorage } from './tokenStorage.js';
 import { TwitchClient, buildUsherUrl } from './twitch.js';
 import { HLSAdBlockProxy } from './proxy.js';
 import { ChatManager } from './chat.js';
+import { VodProgress, isVodId, pickResume } from './progress.js';
 import { EmoteService } from './emotes.js';
 import { LIVE_IDLE_MS, PassthroughProxy, SessionManager, VOD_IDLE_MS } from './sessions.js';
 import { codecFamily, isAllowedUpstream, parseMasterVariants, rewritePlaylist } from './hlsLogic.js';
@@ -52,6 +53,7 @@ await twitch.init();
 const sessions = new SessionManager();
 const chat = new ChatManager({ twitch });
 const emotes = new EmoteService();
+const vodProgress = await new VodProgress(path.join(CONFIG_DIR, 'vod-progress.json')).load();
 
 const app = express();
 app.disable('x-powered-by');
@@ -226,17 +228,22 @@ app.post('/api/play', ah(async (req, res) => {
   }
 
   if (parsed.type === 'vod') {
-    const [vod, url] = await Promise.all([twitch.getVodInfo(parsed.id), twitch.getVodUrl(parsed.id)]);
-    if (!vod || !url) throw new ApiError(404, 'vod_not_found', 'VOD not found or not playable');
+    const [vod, sources, remote] = await Promise.all([
+      twitch.getVodInfo(parsed.id), twitch.getVodSources(parsed.id), twitch.getVodResume(parsed.id).catch(() => null),
+    ]);
+    if (!vod || !sources.length) throw new ApiError(404, 'vod_not_found', 'VOD not found or not playable');
+    const durationSeconds = Number(vod.duration) || 0;
+    const resume = pickResume(vodProgress.get(parsed.id), remote, durationSeconds);
     const session = sessions.create({
       kind: 'vod', channel: vod.owner?.login ?? '', idleMs: VOD_IDLE_MS, segmentMode,
       meta: {
         title: vod.title ?? 'VOD', channel: vod.owner?.login ?? '', displayName: vod.owner?.displayName ?? '',
         duration: formatDuration(vod.duration), views: vod.viewCount ?? 0, createdAt: vod.createdAt ?? null,
         thumbnail: thumbnail(vod.owner?.login ?? ''),
+        vodId: parsed.id, durationSeconds, resume, tokenMode: sources[0].mode,
       },
     });
-    session.proxy = new PassthroughProxy({ twitch, masterUrl: url, quality, allowedCodecs, onEvent: (l, m) => session.emitEvent(l, m), wrap: session.wrap() });
+    session.proxy = new PassthroughProxy({ twitch, sources, quality, allowedCodecs, onEvent: (l, m) => session.emitEvent(l, m), wrap: session.wrap() });
     return res.json(sessionMeta(session));
   }
 
@@ -295,6 +302,38 @@ app.get('/api/play/:sid/events', (req, res) => {
     s.touch();
   });
 });
+
+// ---- VOD resume + chat replay -------------------------------------------------------------
+const vodId = (s) => {
+  if (!isVodId(s)) throw new ApiError(400, 'invalid_input', 'Invalid VOD id');
+  return String(s);
+};
+
+// Resumable VODs, for "Resume 1:23:45" labels on list pages.
+app.get('/api/vod-progress', (req, res) => res.json({ entries: vodProgress.resumable() }));
+
+app.put('/api/vod/:id/progress', (req, res) => {
+  const id = vodId(req.params.id);
+  const entry = vodProgress.set(id, req.body?.position, req.body?.duration);
+  if (!entry) throw new ApiError(400, 'invalid_input', 'Invalid position');
+  res.json({ ok: true, position: entry.position });
+});
+
+// "Start over" / finished: leaves a marker so Twitch's older position is ignored too.
+app.delete('/api/vod/:id/progress', (req, res) => {
+  vodProgress.clear(vodId(req.params.id));
+  res.json({ ok: true });
+});
+
+// One page of the VOD's chat. First page: ?offset=<seconds>; next pages: ?cursor=<cursor>.
+// Needs no login — Twitch serves VOD chat anonymously.
+app.get('/api/vod/:id/chat', ah(async (req, res) => {
+  const id = vodId(req.params.id);
+  const cursor = typeof req.query.cursor === 'string' && req.query.cursor.length <= 400 ? req.query.cursor : undefined;
+  const offset = Number(req.query.offset);
+  if (!cursor && !(Number.isFinite(offset) && offset >= 0)) throw new ApiError(400, 'invalid_input', 'Missing offset or cursor');
+  res.json(await twitch.getVodComments(id, { offset, cursor }, { selfLogin: twitch.authUser }));
+}));
 
 // ---- chat (IRC bridge; see server/chat.js) ---------------------------------------------------
 app.get('/api/chat/:login/events', ah(async (req, res) => {
@@ -554,9 +593,10 @@ function shutdown(sig) {
   shuttingDown = true;
   log.info(`${sig} received; shutting down`);
   chat.destroy();
+  const flushed = vodProgress.flush().catch(() => {}); // don't lose the last resume positions
   sessions.stopAll();
   stopAllPlayers();
-  server.close(() => process.exit(0));
+  flushed.finally(() => server.close(() => process.exit(0)));
   server.closeAllConnections?.();
   setTimeout(() => process.exit(0), 2000).unref();
 }

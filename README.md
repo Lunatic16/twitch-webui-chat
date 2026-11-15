@@ -7,10 +7,10 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-9146FF.svg?style=flat-square)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%E2%89%A5%2020-339933?style=flat-square&logo=nodedotjs&logoColor=white)](https://nodejs.org)
 [![Docker Compose](https://img.shields.io/badge/docker%20compose-%E2%9C%93-2496ED?style=flat-square&logo=docker&logoColor=white)](#-docker)
-[![Tests](https://img.shields.io/badge/tests-54%20passing-2EA043?style=flat-square)](#-install--run)
+[![Tests](https://img.shields.io/badge/tests-75%20passing-2EA043?style=flat-square)](#-install--run)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-9146FF?style=flat-square)](https://github.com/YOUR_USERNAME/twitch-webui/pulls)
 
-[Install & Run](#-install--run) · [Docker](#-docker) · [Features](#-features) · [Miniplayer](#miniplayer) · [Chat](#chat) · [Multiview](#multiview) · [Shortcuts](#-keyboard-shortcuts) · [API](#-api)
+[Install & Run](#-install--run) · [Docker](#-docker) · [Features](#-features) · [VODs](#vods) · [Miniplayer](#miniplayer) · [Chat](#chat) · [Multiview](#multiview) · [Shortcuts](#-keyboard-shortcuts) · [API](#-api)
 
 </div>
 
@@ -18,14 +18,16 @@
 
 - 🚫 **Ad-block HLS proxy** — five token flavors, ad-marker scanning, smart flavor rotation; if nothing clean exists the ad playlist passes through unchanged, **never quality degradation**
 - 🪟 **Miniplayer** — navigate away from a playing stream and it keeps playing in a small, draggable window while you browse
+- ⏯️ **VOD resume** — VODs pick up where you stopped (this app's own record, merged with your twitch.tv watch history when a web token is set), with *Start over* and "Resume 1:23:45" labels in VOD lists
+- 🗨️ **VOD chat replay** — the recorded chat scrolls in sync with the video, follows seeks, and needs no login
 - 💬 **Native chat** — real two-way IRC chat with badges, BTTV/7TV emotes (incl. zero-width stacking) and mention highlighting, in a viewport-fitting panel for watch & multiview
-- 💻 **Multiview wall** — 2 / 4 / 6 tiles, grid & featured layouts, presets, drag-and-drop, shareable URLs
+- 💻 **Multiview wall** — 2 / 4 / 6 tiles, grid & featured layouts, presets, drag-and-drop, shareable URLs, and per-tile audio so several streams can play sound at once
 - 🔑 **Full OAuth flow** — QR-code login, token validation, optional OS keyring storage
-- 🖥️ **1440p60 Streams** — Picks up streams that offer 1440p60 or other high-quality source renditions when a browser session web token is provided.
+- 🖥️ **1440p60 streams & VODs** — Picks up live streams *and VODs* that offer 1440p60 or other high-quality source renditions when a browser session web token is provided.
 - 🔍 **Browse & playback** — followed-live, categories, channel search, VODs, clips, audio-only
 - 🩺 **Diagnostics** — per-flavor rendition tables, token-mode status, failure reasons
 - 🐳 **Docker-ready** — `docker compose up -d --build` and you're live; healthcheck included, config survives rebuilds
-- 🧪 **54 unit tests** — pure logic with mocked `fetch` & fake IRC sockets, powered by Node's built-in `node:test`
+- 🧪 **75 unit tests** — pure logic with mocked `fetch` & fake IRC sockets, powered by Node's built-in `node:test`
 
 ![Player](docs/screenshots/main.png)
 
@@ -53,7 +55,7 @@
 npm install
 npm start          # http://127.0.0.1:3010
 npm run dev        # same with --watch
-npm test           # 54 unit tests (pure logic, mocked fetch & fake IRC sockets)
+npm test           # 75 unit tests (pure logic, mocked fetch & fake IRC sockets)
 ```
 
 **Login** (Settings → Login, or the sidebar button):
@@ -66,9 +68,9 @@ Tokens are validated via `oauth2/validate` and stored at `~/.config/twitch-webui
 > [!TIP]
 > Port **3010** is the default, matching the spec. If another app (e.g. the older `twitch-webui-chatgpt` build) is already on 3010, run `PORT=3011 npm start`.
 
-## 🖥️ Higher Quality Streams (Source / 1440p60)
+## 🖥️ Higher Quality Streams & VODs (Source / 1440p60)
 
-Some channels stream above 1080p60 (for example a 1440p60 source). Twitch only offers those renditions to a logged-in **web** session, so without one you will only see up to 1080p60/720p60 even though the stream has more. The login created by `Login` is *not* accepted for playback tokens (Twitch answers `401 Unauthorized`), so these streams need the browser session token as well.
+Some channels stream above 1080p60 (for example a 1440p60 source), and their VODs keep that rendition. Twitch only offers those renditions to a logged-in **web** session, so without one you will only see up to 1080p60/720p60 even though the stream has more. This applies to **live streams and VODs alike**. The login created by `Login` is *not* accepted for playback tokens (Twitch answers `401 Unauthorized`), so these streams need the browser session token as well.
 
 **1. Copy your browser's `auth-token` cookie**
 
@@ -77,6 +79,8 @@ In your browser, while logged in to twitch.tv: open DevTools → *Application* (
 **2. Save Web Auth Token**
 
 Navigate back to the App Settings →  Scroll to the bottom of settings → Paste the token value → Save
+
+**For VODs** the web token is used automatically: the server asks Twitch for a web-session playback token first and requests the full rendition list (`web/site` player params, `supported_codecs=av1,h265,h264`), so the quality picker offers 1440p when the broadcast has it and *Best (source)* picks it. The anonymous mobile token stays as a fallback — if Twitch rejects the web token for a particular VOD (or the token has expired) playback quietly continues with it, a warning appears in the event log, and the failure shows up under *Diagnostics → token-mode failures* as `vod-web-login`. A green **web token** chip on the watch page tells you the web token is in use. The browser still has to be able to decode the rendition: 1440p is often HEVC or AV1, and renditions your browser can't decode are hidden.
 
 ## 🐳 Docker
 
@@ -159,6 +163,19 @@ Followed-live, category browse (search + fuzzy fallback over top 100, difflib 0.
 
 The `--list-qualities` port: per-flavor rendition tables, which token mode succeeded, `TWITCH_WEB_AUTH_TOKEN` state, failure reasons.
 
+### VODs
+
+Open a VOD from the **VODs** page, a `/videos/<id>` URL, or *Play latest VOD* on an offline channel.
+
+- **Resume where you left off** — progress is saved about every 10 s while playing, when you pause, when you leave the page, and on reload/recovery. Opening the VOD again starts at that position (the first 15 s and last 30 s are ignored). A **Resumed at 0:40 · Start over** chip on the watch page discards the position; finishing a VOD also resets it. The VODs list shows a progress bar and a **Resume 1:23:45** button for anything in progress.
+- **Twitch watch history** — when a web token (or your OAuth login) is available, the server also reads your position from Twitch's own `viewingHistory`, so a VOD you were watching on twitch.tv resumes here too. Whichever record is newer wins; a "start over" here also overrides an older position still sitting in Twitch's history. The app does **not** write progress back to Twitch — its own record lives in `~/.config/twitch-webui/vod-progress.json` (shared by every browser that uses this server; capped at 300 VODs).
+- **Chat replay** — the chat button works on VODs. The panel fetches the recorded chat from `/api/vod/:id/chat`, starts ~20 s before the current position, and releases each message when the video reaches it. Seeking (or the video restarting) resets the panel and refetches from the new position; pausing pauses the chat; messages are prefetched ~30 s ahead, and when the known chat runs out (a VOD of a stream that is still live keeps growing) it re-checks every 5 s. It reuses the live chat renderer (badges, Twitch emotes, BTTV/7TV when logged in, mention highlighting) but is read-only and **needs no login**.
+- **VODs of a stream that is still live** — these play like any VOD: they start at the beginning (or your resume point) and never snap back to the live edge, and you can seek anywhere.
+- **1440p** — see [Higher Quality Streams & VODs](#️-higher-quality-streams--vods-source--1440p60).
+
+> [!NOTE]
+> VOD chat comes from the same undocumented GQL endpoint twitch.tv uses (a persisted query, with a plain-query fallback), and the resume lookup from `video.self.viewingHistory`. If Twitch changes either, replay shows "Replay unavailable" and resume falls back to this app's own record — playback itself is unaffected.
+
 ### Miniplayer
 
 Navigating away from `/watch` (Followed, Browse, Search, VODs, Settings…) doesn't stop playback — the player is docked in the bottom-right corner so you can keep browsing.
@@ -194,7 +211,7 @@ Implemented in `server/chat.js` (IRC bridge + pure IRC parsing helpers), `server
 
 - **2 / 4 / 6 tiles** — grid + featured ("1 large + N small") layouts, stacked option for 2
 - **Per-tile controls** — mute / volume / quality / adblock / reload / fullscreen / remove
-- **Audio focus** — focused or all-muted
+- **Audio: follows focus (default) or manual** — by default exactly one tile has sound and clicking/focusing another tile moves it. Unmute any other tile (its speaker button, its volume slider, or `M` while it's focused) and it plays **in addition** to the others, each at its own volume; the toolbar switches to **Audio: manual (N on)** and focusing tiles no longer touches audio. Click that toolbar button (or **Mute all**, `Shift+M`) to return to follow-focus. Tiles with sound on show a small speaker badge. "All muted on start" in Settings still applies
 - **Offline overlay** — retry / replace / latest VOD
 - **Drag-and-drop swap** and click-to-focus (promotes to the big slot)
 - **Native chat** for the focused tile — the same [chat panel](#chat), sharing one IRC bridge connection
@@ -207,13 +224,15 @@ Implemented in `server/chat.js` (IRC bridge + pure IRC parsing helpers), `server
 | Key | Action |
 |---|---|
 | `1`–`6` | focus tile |
-| `M` | mute focused |
-| `Shift+M` | mute all |
+| `M` | mute / unmute the focused tile only (other tiles keep their audio) |
+| `Shift+M` | mute all (and return to follow-focus audio) |
 | `F` | fullscreen wall (per-tile button for single-tile fullscreen) |
 | `L` | cycle layout |
 | `A` | add stream |
 | `Esc` | exit fullscreen |
 | `?` | help |
+
+Watch page (single player): `Space`/`K` play-pause · `←`/`→` ±5 s · `J`/`L` ±10 s · `↑`/`↓` volume · `M` mute · `F` fullscreen · `T` theater · `End` live edge.
 
 ## 🔌 API
 
@@ -229,6 +248,7 @@ POST /api/resolve {input}
 GET  /api/stream/:login/info
 POST /api/play {input, quality?, adblock?, audioOnly?, lowLatency?}
      -> {sessionId, playbackUrl, meta} | {offline, latestVod}
+     VOD meta adds: vodId, durationSeconds, resume:{position,source}|null, tokenMode ('web-login'|'anonymous')
 DELETE /api/play/:sessionId   GET /api/play/:sessionId/events (SSE)
 GET  /api/events (SSE: toasts + debug logs)
 
@@ -241,6 +261,13 @@ GET  /api/chat/:login/emotes -> {emotes:[{provider, id, code, zero?}], counts, e
 GET  /api/followed?after=     GET /api/games/search?q=  GET /api/games/top
 GET  /api/games/:id/streams?after=
 GET  /api/channels/search?q=  GET /api/channels/:login/vods?after=
+
+# VOD resume & chat replay
+GET    /api/vod-progress            -> {entries:{<vodId>:{position,duration}}}  (resumable VODs)
+PUT    /api/vod/:id/progress {position, duration}
+DELETE /api/vod/:id/progress        (start over / finished; keeps a marker that hides Twitch's older position)
+GET    /api/vod/:id/chat?offset=<s> | ?cursor=<c>
+       -> {messages:[{…chat message shape…, offset}], cursor, hasNext}   (no login required)
 
 # Diagnostics & external players
 GET  /api/diagnostics/:login  -> per-flavor renditions + token modes
@@ -258,9 +285,12 @@ GET/POST/DELETE /api/multiview/presets   GET/POST /api/multiview/recent
 - Twitch can change GQL fields, ad injection, or flavor behavior at any time; the token-flavor/rotation logic mirrors the CLI and may need the same upstream fixes.
 - GQL field names differ from Helix (`viewersCount`/`createdAt` vs `viewer_count`/`started_at`) — already accounted for here.
 - VOD/clip playback is direct (no ad rotation), matching the CLI.
+- VOD resume is read from Twitch's history but not written back to it; positions saved here are local to this server.
+- VOD chat replay is read-only and shows what Twitch returns for the VOD: deleted/moderated messages, bits and sub notices that Twitch doesn't include in the comment feed are absent, and BTTV/7TV emotes need a login (they're resolved through Helix).
+- Multiview presets remember the layout and one audio tile, not a multi-tile audio selection.
 - The game fuzzy match uses normalized Levenshtein, not CPython's `difflib.SequenceMatcher` — close, not identical.
 - `keytar` must be installed separately if you want keyring storage.
-- The miniplayer holds one stream at a time and doesn't show chat; the chat panel reloads when you return to the watch page.
+- The miniplayer holds one stream at a time and doesn't show chat; the chat panel reloads when you return to the watch page (a VOD's chat replay re-syncs to the current position).
 - Chat sends are rate-limited server-side (18 msgs / 30 s per process) and require a token with `chat:read` / `chat:edit` — logins made before the chat feature must re-login.
 - BTTV / 7TV emotes are best-effort cosmetics — provider API or CDN failures fall back to plain text.
 - The optional read-only chat embed fallback requires the page host to match `location.hostname` (Twitch embed `parent` rule); native chat has no such restriction.

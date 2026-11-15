@@ -62,6 +62,7 @@ class Tile {
     t.badge = h('span', { class: 'chip', title: 'Current rendition' });
     t.stat = h('span', { class: 'chip', title: 'Buffering / distance from live edge' });
     t.viewersEl = h('span', { class: 'chip' });
+    t.audioDot = h('span', { class: 'mv-audio-dot', title: 'Audio on', 'aria-hidden': 'true', hidden: true }, icon('volume'));
     t.grip = h('span', { class: 'mv-grip icon-btn', draggable: true, title: 'Drag to swap tiles', 'aria-label': 'Drag to reorder' }, icon('grip'));
     t.top = h('div', { class: 'mv-top' }, t.grip, t.nameEl, t.titleEl, t.viewersEl, t.badge, t.stat);
 
@@ -74,7 +75,7 @@ class Tile {
         const vid = t.player?.video;
         if (!vid) return;
         vid.volume = v;
-        if (v > 0 && (vid.muted || t.mv.audio !== t)) t.mv.setAudio(t); // touching the slider moves audio here
+        if (v > 0 && !t.mv.audible(t)) t.mv.unmute(t); // raising the slider unmutes this tile (others keep playing)
       },
       extras: [
         t.qualitySel, t.abBtn,
@@ -87,7 +88,7 @@ class Tile {
     t.status = h('div', { class: 'mv-status' });
     t.overlay = h('div', { class: 'overlay', hidden: true });
     t.emptyEl = h('div', { class: 'mv-empty' });
-    t.el.append(t.top, t.status, t.bottom, t.overlay, t.emptyEl);
+    t.el.append(t.top, t.status, t.bottom, t.overlay, t.emptyEl, t.audioDot);
 
     // composedPath() is fixed at dispatch time, so it still names the control bars even when a
     // handler re-rendered a button (detaching e.target) before the event reached the tile.
@@ -192,7 +193,7 @@ class Tile {
     t.paint();
     if (delay) await sleep(delay);
     if (!t.channel || !t.player) return;
-    t.player.video.muted = t.mv.audio !== t;
+    t.player.video.muted = !t.mv.audible(t);
     t.updateMute();
     t.player.start(t.channel, { quality: ctx.settings.quality || null, adblock: t.adblock ?? undefined });
   }
@@ -261,7 +262,12 @@ class Tile {
     setTimeout(() => chip.remove(), 8000);
   }
 
-  updateMute() { this.controls.syncVolume(); }
+  updateMute() {
+    this.controls.syncVolume();
+    const on = !!this.player && !this.player.video.muted && this.player.video.volume > 0;
+    this.audioDot.hidden = !on || !this.channel;
+    this.el.classList.toggle('audible', on);
+  }
 
   fullscreen() {
     if (document.fullscreenElement === this.el) document.exitFullscreen();
@@ -285,7 +291,12 @@ class Multiview {
     this.root = root;
     this.tiles = [];
     this.focus = null;
-    this.audio = null;
+    // Tiles whose audio is on. Default ("follow focus"): just the focused tile, and
+    // focusing another tile moves the audio. Once the viewer unmutes a second tile
+    // (or picks "Audio: manual"), several tiles can play at once and focus no
+    // longer touches audio until they switch back or press Mute all.
+    this.audioSet = new Set();
+    this.audioManual = false;
     this.layout = '2x2';
     this.chatOn = false;
     this._followed = null;
@@ -321,7 +332,7 @@ class Multiview {
 
     const firstLive = this.tiles.find((t) => t.channel);
     this.focus = firstLive ?? null;
-    this.audio = ctx.settings.mvAudioFocus === 'muted' ? null : firstLive ?? null;
+    this.resetAudio();
     const stagger = ctx.settings.mvStaggerMs ?? 250;
     this.tiles.filter((t) => t.channel).forEach((t, i) => t.start(i * stagger));
     this.tiles.forEach((t) => t.paint());
@@ -350,10 +361,16 @@ class Multiview {
     };
     this.countBtns = [mk(2, '2', 'cols2'), mk(4, '4', 'grid'), mk(6, '6', 'layers')];
     this.chatBtn = h('button', { class: 'icon-btn', 'aria-label': 'Toggle chat', 'aria-pressed': 'false', title: 'Chat for focused tile', onclick: () => this.toggleChat() }, icon('chat'));
+    this.audioModeBtn = h('button', {
+      class: 'btn sm', 'aria-pressed': 'true',
+      title: 'Audio follows the focused tile. Click for manual mode: unmute any tiles you like and focus changes leave audio alone.',
+      onclick: () => this.setAudioManual(!this.audioManual),
+    }, icon('volume'), 'Audio: follows focus');
     this.toolbar = h('div', { class: 'mv-toolbar', role: 'toolbar', 'aria-label': 'Multiview controls' },
       h('div', { class: 'group' }, this.countBtns),
       h('button', { class: 'btn sm', onclick: () => this.cycleLayout(), title: 'Cycle layout (L)' }, icon('layers'), 'Layout'),
       h('span', { class: 'spacer' }),
+      this.audioModeBtn,
       h('button', { class: 'btn sm', onclick: () => this.muteAll() }, icon('mute'), 'Mute all'),
       h('button', { class: 'btn sm', onclick: () => this.pauseAll() }, icon('pause'), 'Pause all'),
       h('button', { class: 'btn sm', onclick: () => this.liveAll() }, icon('live'), 'Live edge'),
@@ -371,7 +388,7 @@ class Multiview {
 
   ensureTiles(n) {
     while (this.tiles.length < n) { const t = new Tile(this); this.tiles.push(t); }
-    while (this.tiles.length > n) { const t = this.tiles.pop(); t.release(); t.el.remove(); if (this.focus === t) this.focus = null; if (this.audio === t) this.audio = null; }
+    while (this.tiles.length > n) { const t = this.tiles.pop(); t.release(); t.el.remove(); if (this.focus === t) this.focus = null; this.audioSet.delete(t); }
   }
 
   applyLayout() {
@@ -392,7 +409,7 @@ class Multiview {
     this.layout = layout;
     this.ensureTiles(n);
     if (!this.focus || !this.tiles.includes(this.focus)) this.focus = this.tiles.find((t) => t.channel) ?? null;
-    if (this.audio && !this.tiles.includes(this.audio)) this.audio = this.focus;
+    this.pruneAudio();
     this.applyLayout();
     this.persist();
     this.refreshChat();
@@ -416,7 +433,7 @@ class Multiview {
     if (this.tiles.some((t) => t !== tile && t.channel === channel)) { toast(`${channel} is already on the wall`, 'info'); return; }
     tile.setChannel(channel);
     if (!this.focus) this.focus = tile;
-    if (!this.audio && ctx.settings.mvAudioFocus !== 'muted') this.audio = tile;
+    if (!this.audioSet.size && !this.audioManual && ctx.settings.mvAudioFocus !== 'muted') this.audioSet.add(tile);
     tile.start();
     this.persist();
     this.tiles.forEach((t) => { if (!t.channel) t.renderEmpty(); });
@@ -442,10 +459,14 @@ class Multiview {
   }
 
   remove(tile) {
-    const wasAudio = this.audio === tile, wasFocus = this.focus === tile;
+    const wasAudio = this.audioSet.has(tile), wasFocus = this.focus === tile;
     tile.setChannel(null);
+    this.audioSet.delete(tile);
     if (wasFocus) this.focus = this.tiles.find((t) => t.channel) ?? null;
-    if (wasAudio) this.audio = ctx.settings.mvAudioFocus === 'muted' ? null : this.focus;
+    if (wasAudio && !this.audioSet.size) { // the tile that had the audio is gone: hand it to the focused tile
+      this.audioManual = false;
+      if (ctx.settings.mvAudioFocus !== 'muted' && this.focus) this.audioSet.add(this.focus);
+    }
     this.applyAudio();
     this.tiles.forEach((t) => { t.applyPolicy(); t.paint(); if (!t.channel) t.renderEmpty(); });
     this.persist();
@@ -470,25 +491,68 @@ class Multiview {
       t = tile;
     }
     this.focus = t;
-    this.setAudio(t);
+    if (!this.audioManual) this.setAudio(t); // manual mode: focus leaves audio alone
     this.tiles.forEach((x) => { x.applyPolicy(); x.paint(); });
     this.refreshChat();
   }
 
   // ---- audio ----
-  setAudio(tile) { this.audio = tile; this.applyAudio(); }
+  audible(tile) { return this.audioSet.has(tile); }
+
+  /** Default behaviour: audio on exactly one tile (or none). */
+  setAudio(tile) { this.audioSet = new Set(tile ? [tile] : []); this.applyAudio(); }
+
+  /** Start-up / preset state: the focused tile has audio, unless "all muted on start" is set. */
+  resetAudio() {
+    this.audioManual = false;
+    this.audioSet = new Set(ctx.settings.mvAudioFocus === 'muted' || !this.focus ? [] : [this.focus]);
+    this.applyAudio();
+  }
+
+  /** Drop tiles that no longer exist; if nothing is left, fall back to following focus. */
+  pruneAudio() {
+    const had = this.audioSet.size;
+    this.audioSet = new Set([...this.audioSet].filter((t) => this.tiles.includes(t) && t.channel));
+    if (had && !this.audioSet.size) {
+      this.audioManual = false;
+      if (ctx.settings.mvAudioFocus !== 'muted' && this.focus) this.audioSet.add(this.focus);
+    }
+  }
+
+  /** Turn this tile's audio on without touching the other tiles. */
+  unmute(tile) {
+    if (!tile?.channel) return;
+    this.audioSet.add(tile);
+    // Two tiles audible, or a tile that isn't the focused one: the viewer is choosing audio themselves.
+    if (this.audioSet.size > 1 || tile !== this.focus) this.audioManual = true;
+    this.applyAudio();
+  }
+
+  mute(tile) {
+    this.audioSet.delete(tile);
+    if (!this.audioSet.size) this.audioManual = false; // nothing playing: back to the default
+    this.applyAudio();
+  }
+
+  setAudioManual(on) {
+    this.audioManual = on;
+    if (!on) this.setAudio(this.focus); // back to "follows focus": only the focused tile plays
+    else this.applyAudio();
+  }
 
   applyAudio() {
-    this.tiles.forEach((t) => { if (t.player) { t.player.video.muted = this.audio !== t; t.updateMute(); } });
+    this.tiles.forEach((t) => { if (t.player) { t.player.video.muted = !this.audioSet.has(t); t.updateMute(); } else t.updateMute(); });
+    const n = this.audioSet.size;
+    this.audioModeBtn.setAttribute('aria-pressed', String(!this.audioManual));
+    this.audioModeBtn.lastChild.textContent = this.audioManual ? `Audio: manual${n ? ` (${n} on)` : ''}` : 'Audio: follows focus';
   }
 
   toggleMute(tile) {
-    const muted = !tile.player || tile.player.video.muted;
-    if (muted) this.setAudio(tile);
-    else { this.audio = null; this.applyAudio(); }
+    if (this.audible(tile) && tile.player && !tile.player.video.muted) this.mute(tile);
+    else this.unmute(tile);
   }
 
-  muteAll() { this.audio = null; this.applyAudio(); }
+  muteAll() { this.audioManual = false; this.audioSet.clear(); this.applyAudio(); }
   pauseAll() {
     const anyPlaying = this.tiles.some((t) => t.player && !t.player.video.paused);
     this.tiles.forEach((t) => { if (!t.player) return; if (anyPlaying) t.player.pause(); else t.player.play(); });
@@ -545,7 +609,7 @@ class Multiview {
         const n = name.value.trim();
         if (!n) return;
         try {
-          await api('/api/multiview/presets', { method: 'POST', body: { name: n, channels: this.tiles.map((t) => t.channel), layout: this.layout, audioIndex: Math.max(0, this.tiles.indexOf(this.audio ?? this.focus)) } });
+          await api('/api/multiview/presets', { method: 'POST', body: { name: n, channels: this.tiles.map((t) => t.channel), layout: this.layout, audioIndex: Math.max(0, this.tiles.indexOf([...this.audioSet][0] ?? this.focus)) } });
           name.value = ''; toast('Preset saved', 'ok'); render();
         } catch (e) { toast(e.message, 'err'); }
       } }, icon('save'), 'Save current wall'))],
@@ -560,7 +624,7 @@ class Multiview {
     p.channels.slice(0, this.tiles.length).forEach((c, i) => { if (c) this.tiles[i].setChannel(c); });
     const target = this.tiles[p.audioIndex] ?? this.tiles.find((t) => t.channel) ?? null;
     this.focus = target?.channel ? target : this.tiles.find((t) => t.channel) ?? null;
-    this.audio = ctx.settings.mvAudioFocus === 'muted' ? null : this.focus;
+    this.resetAudio();
     this.applyLayout();
     const stagger = ctx.settings.mvStaggerMs ?? 250;
     this.tiles.filter((t) => t.channel).forEach((t, i) => t.start(i * stagger));
@@ -603,7 +667,7 @@ class Multiview {
 }
 
 export function showShortcuts() {
-  const rows = [['1 – 6', 'Focus tile (or add to an empty slot)'], ['M', 'Mute / unmute focused tile'], ['Shift+M', 'Mute all'], ['F', 'Fullscreen focused tile'], ['Shift+F', 'Fullscreen the wall'],
+  const rows = [['1 – 6', 'Focus tile (or add to an empty slot)'], ['M', 'Mute / unmute the focused tile (other tiles keep their audio)'], ['Shift+M', 'Mute all'], ['F', 'Fullscreen focused tile'], ['Shift+F', 'Fullscreen the wall'],
     ['L', 'Cycle layout'], ['A', 'Add a stream'], ['Esc', 'Exit fullscreen'], ['?', 'Show this help'], ['/', 'Focus the play box']];
   modal({ title: 'Keyboard shortcuts', body: h('div', { class: 'kbd-list' }, rows.flatMap(([k, d]) => [h('span', {}, k.split('+').map((x, i) => [i ? ' + ' : '', h('kbd', {}, x)])), h('span', {}, d)])) });
 }

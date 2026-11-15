@@ -3,7 +3,7 @@
 import { api, ApiError } from './api.js';
 import { createChatPanel } from './chat.js';
 import { StreamPlayer } from './player.js';
-import { Controls } from './controls.js';
+import { Controls, fmtTime } from './controls.js';
 import { adopt, buildMiniBar, closeMini, expandMini, getSession, park, setSession } from './mini.js';
 import {
   clear, copyText, confirmDialog, debounce, formatDate, formatUptime, formatViewers, getRecent, h, icon, modal, pushRecent, store, toast,
@@ -34,13 +34,14 @@ function errorBox(e, retry) {
     retry ? h('button', { class: 'btn', onclick: retry }, icon('refresh'), 'Retry') : null);
 }
 
-function thumb(src, login, onclick, { live, viewers, duration, uptime } = {}) {
+function thumb(src, login, onclick, { live, viewers, duration, uptime, progress } = {}) {
   const img = h('img', { src, alt: '', loading: 'lazy', onerror: (e) => { e.target.style.visibility = 'hidden'; } });
   return h('button', { class: 'thumb', onclick, 'aria-label': `Play ${login}` }, img,
     live ? h('span', { class: 'tl chip live' }, 'LIVE') : null,
     viewers !== undefined ? h('span', { class: 'tr chip' }, `${formatViewers(viewers)} viewers`) : null,
     uptime ? h('span', { class: 'br' }, uptime) : null,
-    duration ? h('span', { class: 'br' }, duration) : null);
+    duration ? h('span', { class: 'br' }, duration) : null,
+    progress ? h('span', { class: 'vod-progress', title: 'Watched so far' }, h('span', { style: { width: `${progress}%` } })) : null);
 }
 
 export function streamCard(s) {
@@ -67,14 +68,19 @@ function channelCard(c) {
       h('button', { class: 'btn sm', onclick: () => ctx.navigate(`/vods?c=${encodeURIComponent(c.login)}`), title: 'VODs', 'aria-label': `VODs for ${c.name}` }, icon('film'))));
 }
 
+// VODs with a saved resume position (id -> {position, duration}); filled by vodsView.
+let vodResume = {};
+
 function vodCard(v) {
+  const r = vodResume[v.id];
+  const pct = r?.duration ? Math.min(100, Math.round((r.position / r.duration) * 100)) : 0;
   return h('article', { class: 'card' },
-    thumb(v.thumbnail, v.login, () => ctx.navigate(`/watch?v=${encodeURIComponent(v.id)}`), { duration: v.duration }),
+    thumb(v.thumbnail, v.login, () => ctx.navigate(`/watch?v=${encodeURIComponent(v.id)}`), { duration: v.duration, progress: pct }),
     h('div', { class: 'card-body' },
       h('div', { class: 'card-title', title: v.title }, v.title),
       h('div', { class: 'card-meta' }, `${formatDate(v.createdAt)} · ${formatViewers(v.views)} views`)),
     h('div', { class: 'card-actions' },
-      h('button', { class: 'btn primary sm', onclick: () => ctx.navigate(`/watch?v=${encodeURIComponent(v.id)}`) }, icon('play'), 'Play VOD')));
+      h('button', { class: 'btn primary sm', onclick: () => ctx.navigate(`/watch?v=${encodeURIComponent(v.id)}`) }, icon('play'), r ? `Resume ${fmtTime(r.position)}` : 'Play VOD')));
 }
 
 /**
@@ -263,7 +269,8 @@ export function vodsView(params) {
   const root = h('div', {}, h('h1', {}, 'VODs'), h('p', { class: 'sub' }, 'Past broadcasts for a channel.'),
     h('form', { class: 'row', onsubmit: (e) => { e.preventDefault(); load(); } }, input, h('button', { class: 'btn primary', type: 'submit' }, 'Show VODs')),
     h('div', { style: { height: '16px' } }), results);
-  load();
+  // Saved resume positions first, so the cards can show "Resume 1:23:45" and a progress bar.
+  api('/api/vod-progress').then((r) => { vodResume = r.entries ?? {}; }).catch(() => { vodResume = {}; }).then(load);
   return root;
 }
 
@@ -457,12 +464,23 @@ export function watchView(params, onCleanup) {
     subEl.textContent = [m.displayName, m.game, m.kind === 'vod' ? `${m.duration || ''} · ${formatDate(m.createdAt)}` : null].filter(Boolean).join(' · ');
     clear(chips);
     if (m.kind === 'live') chips.append(h('span', { class: 'chip live' }, 'LIVE'), h('span', { class: 'chip' }, `${formatViewers(m.viewers)} viewers`), m.startedAt ? h('span', { class: 'chip' }, `up ${formatUptime(m.startedAt)}`) : null);
+    if (m.kind === 'vod') {
+      if (m.tokenMode === 'web-login') chips.append(h('span', { class: 'chip ok', title: 'Playback token from your twitch.tv web session: all renditions, including 1440p' }, 'web token'));
+      if (player.resumedAt) {
+        chips.append(h('button', {
+          class: 'chip resume-chip', title: 'Discard the saved position and play from the beginning',
+          onclick: () => { player.startOver(); paintMeta(player.meta); },
+        }, `Resumed at ${fmtTime(player.resumedAt)} · Start over`));
+      }
+    }
     abBtn.setAttribute('aria-pressed', String(!!m.adblock));
     abBtn.disabled = m.kind !== 'live';
     if (m.kind === 'clip') qualitySel.disabled = true;
-    // Chat only makes sense on live streams.
-    chatBtn.hidden = m.kind !== 'live';
-    if (m.kind !== 'live' && chatBtn.getAttribute('aria-pressed') === 'true') showChat(false);
+    // Chat: live IRC for streams, a time-synced replay for VODs; nothing for clips.
+    const hasChat = m.kind === 'live' || m.kind === 'vod';
+    chatBtn.hidden = !hasChat;
+    chatBtn.title = m.kind === 'vod' ? 'Chat replay' : 'Chat';
+    if (!hasChat && chatBtn.getAttribute('aria-pressed') === 'true') showChat(false);
     else if (chatBtn.getAttribute('aria-pressed') === 'true') showChat(true);
   };
   const policyValue = () => {
@@ -516,17 +534,21 @@ export function watchView(params, onCleanup) {
       return;
     }
     fitChat();
-    // Native chat via the server's IRC bridge (web/js/chat.js). Rebuild only
-    // when the channel actually changed, so repaints keep the scrollback.
-    if (!state.channel || chatPanel?.channel === state.channel) return;
+    // Native chat via the server's IRC bridge (web/js/chat.js); for a VOD, the same
+    // panel replays the recorded chat in sync with the video. Rebuild only when the
+    // stream/VOD actually changed, so repaints keep the scrollback.
+    const vodId = player.meta?.kind === 'vod' ? player.meta.vodId : null;
+    const key = vodId ? `vod:${vodId}` : state.channel;
+    if (!key || chatPanel?.key === key) return;
     chatPanel?.destroy();
     clear(chatBox);
     chatPanel = createChatPanel({
-      login: state.channel,
+      login: state.channel || player.meta?.channel || '',
       displayName: player.meta?.displayName || state.channel,
       auth: () => ctx.auth,
       requestLogin: () => openLogin(),
-      embedSrc: `https://www.twitch.tv/embed/${encodeURIComponent(state.channel)}/chat?parent=${location.hostname}&darkpopout`,
+      embedSrc: vodId ? undefined : `https://www.twitch.tv/embed/${encodeURIComponent(state.channel)}/chat?parent=${location.hostname}&darkpopout`,
+      replay: vodId ? { videoId: vodId, getTime: () => player.video.currentTime } : undefined,
     });
     chatBox.append(chatPanel.el);
   }
@@ -670,7 +692,7 @@ export function settingsView() {
       ] : h('p', { class: 'muted' }, 'Disabled: the server is exposed to the network without ACCESS_PIN.'),
       h('div', {}, saveBtn),
       h('h2', {}, 'Web auth token (optional)'),
-      h('p', { class: 'muted' }, 'The twitch.tv “auth-token” cookie. Enables the web-login playback mode, which can unlock subscriber/turbo ad-free playback.'),
+      h('p', { class: 'muted' }, 'The twitch.tv “auth-token” cookie. Enables the web-login playback mode (subscriber/turbo ad-free playback), 1440p and other high-quality renditions on live streams and VODs, and VOD resume positions saved on twitch.tv.'),
       h('div', { class: 'row' }, webTok,
         h('button', { class: 'btn', onclick: async () => { if (!webTok.value.trim()) return; try { await api('/api/auth/web-token', { method: 'PUT', body: { token: webTok.value } }); webTok.value = ''; await ctx.refreshAuth(); toast('Web token saved', 'ok'); } catch (e) { toast(e.message, 'err'); } } }, 'Save'),
         ctx.auth.webTokenSet ? h('button', { class: 'btn danger', onclick: async () => { await api('/api/auth/web-token', { method: 'PUT', body: { token: null } }); await ctx.refreshAuth(); toast('Web token removed', 'info'); ctx.navigate('/settings'); } }, 'Remove') : null),

@@ -6,6 +6,7 @@ import {
 } from './constants.js';
 import { ApiError, closestMatch, sleep } from './util.js';
 import { appEvents, forgetSecret, log, registerSecret } from './log.js';
+import { COMMENTS_HASH, COMMENTS_OPERATION, COMMENTS_QUERY, parseComments } from './vodChat.js';
 
 const FAIL_TTL_MS = 10 * 60 * 1000; // a failed token mode is skipped for 10 min
 const VALIDATE_TTL_MS = 5 * 60 * 1000;
@@ -20,11 +21,17 @@ export function buildUsherUrl(channel, token, signature) {
   );
 }
 
-export function buildVodUsherUrl(id, token, signature) {
+// Web-session player params (what twitch.tv itself requests); these are the ones
+// that expose the full rendition list, including 1440p, to a logged-in viewer.
+export const VOD_WEB_PARAMS = Object.freeze({ platform: 'web', playerBackend: 'mediaplayer', playerType: 'site' });
+
+export function buildVodUsherUrl(id, token, signature, { codecs = false } = {}) {
   return (
     `https://usher.ttvnw.net/vod/${id}.m3u8?player=twitchweb` +
     `&token=${encodeURIComponent(token)}&sig=${encodeURIComponent(signature)}` +
-    '&allow_audio_only=true&allow_source=true&playlist_include_framerate=true&type=any'
+    '&allow_audio_only=true&allow_source=true&playlist_include_framerate=true&type=any' +
+    // Higher rungs (1440p) are often HEVC/AV1; the proxy still hides codecs the browser can't decode.
+    (codecs ? '&supported_codecs=av1,h265,h264' : '')
   );
 }
 
@@ -237,9 +244,14 @@ export class TwitchClient {
 
   /** @returns {Promise<{data: any, error: string}>} never throws */
   async gql(query, variables, headers = {}) {
+    return this.gqlBody({ query, variables }, headers);
+  }
+
+  /** Same as gql() but takes the whole request body (persisted queries, operationName...). */
+  async gqlBody(body, headers = {}) {
     let res;
     try {
-      res = await this.request('POST', GQL_URL, { headers: { ...GQL_HEADERS, ...headers }, json: { query, variables } });
+      res = await this.request('POST', GQL_URL, { headers: { ...GQL_HEADERS, ...headers }, json: body });
     } catch (e) {
       return { data: null, error: `request failed: ${e.message}`, network: true };
     }
@@ -247,11 +259,11 @@ export class TwitchClient {
       const text = (await res.text().catch(() => '')).slice(0, 120).trim();
       return { data: null, error: `HTTP ${res.status}: ${text}`, status: res.status };
     }
-    let body;
-    try { body = await res.json(); } catch { return { data: null, error: 'invalid JSON from GQL' }; }
-    const error = body?.errors ? JSON.stringify(body.errors).slice(0, 160) : '';
+    let payload;
+    try { payload = await res.json(); } catch { return { data: null, error: 'invalid JSON from GQL' }; }
+    const error = payload?.errors ? JSON.stringify(payload.errors).slice(0, 160) : '';
     if (error) log.debug('GQL errors:', error);
-    return { data: body?.data ?? null, error };
+    return { data: payload?.data ?? null, error };
   }
 
   async helix(endpoint, params = {}) {
@@ -371,13 +383,85 @@ export class TwitchClient {
   }
 
   // ---- VODs ------------------------------------------------------------
-  async getVodUrl(id) {
+  /**
+   * Playback sources for a VOD, best first. With a web token the first source is
+   * a web-session token (full rendition list, incl. 1440p); the anonymous mobile
+   * token always follows as a fallback, so a bad/expired web token never blocks
+   * playback. Resolves [{ url, mode }] (empty when no token could be issued).
+   */
+  async getVodSources(id) {
     const query = `query PlaybackAccessToken_Template($id: ID!, $params: PlaybackAccessTokenParams!) {
       videoPlaybackAccessToken(id: $id, params: $params) { value signature __typename }
     }`;
-    const { data } = await this.gql(query, { id, params: AD_FREE_PARAM_SETS[0] });
-    const t = data?.videoPlaybackAccessToken;
-    return t?.value && t?.signature ? buildVodUsherUrl(id, t.value, t.signature) : null;
+    const fetchToken = async (params, headers) => {
+      const { data, error } = await this.gql(query, { id, params }, headers);
+      const t = data?.videoPlaybackAccessToken;
+      return { t: t?.value && t?.signature ? t : null, error };
+    };
+
+    const webKey = 'vod-web-login';
+    const useWeb = !!this.webToken && !(this.failedModes.get(webKey) && Date.now() - this.failedModes.get(webKey) < FAIL_TTL_MS);
+    const [web, anon] = await Promise.all([
+      useWeb ? fetchToken(VOD_WEB_PARAMS, { Authorization: `OAuth ${this.webToken}` }) : null,
+      fetchToken(AD_FREE_PARAM_SETS[0], {}),
+    ]);
+
+    const sources = [];
+    if (web?.t) sources.push({ url: buildVodUsherUrl(id, web.t.value, web.t.signature, { codecs: true }), mode: 'web-login' });
+    else if (useWeb) {
+      this.failedModes.set(webKey, Date.now());
+      this.tokenFailures[webKey] = web?.error || 'no token returned';
+    }
+    if (anon.t) sources.push({ url: buildVodUsherUrl(id, anon.t.value, anon.t.signature), mode: 'anonymous' });
+    return sources;
+  }
+
+  async getVodUrl(id) {
+    return (await this.getVodSources(id))[0]?.url ?? null;
+  }
+
+  /**
+   * Twitch's own resume position (video.self.viewingHistory) for the signed-in
+   * viewer. Needs the web token (or, failing that, the OAuth login); resolves
+   * {position, updatedAt(ms)} or null — never throws, resume is best-effort.
+   */
+  async getVodResume(id) {
+    const attempts = [];
+    if (this.webToken) attempts.push({ Authorization: `OAuth ${this.webToken}` });
+    if (this.token) attempts.push({ Authorization: `OAuth ${this.token}`, 'Client-ID': OAUTH_CLIENT_ID });
+    if (!attempts.length) return null;
+    const query = `query VodResume($id: ID!) { video(id: $id) { self { viewingHistory { position updatedAt } } } }`;
+    for (const headers of attempts) {
+      const { data, error } = await this.gql(query, { id }, headers);
+      const h = data?.video?.self?.viewingHistory;
+      if (h && Number.isFinite(Number(h.position))) {
+        return { position: Number(h.position), updatedAt: Date.parse(h.updatedAt) || 0 };
+      }
+      if (data?.video) return null; // query worked, nothing saved for this VOD
+      if (error) log.debug('VOD resume lookup failed:', error);
+    }
+    return null;
+  }
+
+  /**
+   * One page of a VOD's chat. Pass `offset` (seconds) for the first page and the
+   * returned `cursor` for the following ones. Resolves {messages, cursor, hasNext}.
+   */
+  async getVodComments(id, { offset, cursor } = {}, { selfLogin = null } = {}) {
+    const variables = cursor ? { videoID: id, cursor } : { videoID: id, contentOffsetSeconds: Math.max(0, Math.floor(Number(offset) || 0)) };
+    let { data, error } = await this.gqlBody({
+      operationName: COMMENTS_OPERATION,
+      variables,
+      extensions: { persistedQuery: { version: 1, sha256Hash: COMMENTS_HASH } },
+    });
+    if (!data?.video && /PersistedQuery/i.test(error)) {
+      // Twitch rotated the hash: fall back to the plain query.
+      ({ data, error } = await this.gql(COMMENTS_QUERY, cursor ? { id, cursor } : { id, offset: variables.contentOffsetSeconds }));
+    }
+    if (!data && error) throw new ApiError(502, 'gql_error', `Chat replay unavailable: ${error}`);
+    const page = parseComments(data, { selfLogin });
+    if (!page.found) throw new ApiError(404, 'vod_not_found', 'VOD not found');
+    return { messages: page.messages, cursor: page.cursor, hasNext: page.hasNext };
   }
 
   async getVodInfo(id) {

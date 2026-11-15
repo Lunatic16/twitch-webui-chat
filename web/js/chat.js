@@ -2,6 +2,7 @@
 // SSE (/api/chat/:login/events) and sends through POST /api/chat/:login/message.
 // All text is rendered as DOM text nodes via h() (XSS-safe by construction).
 import { api } from './api.js';
+import { createReplayDriver } from './replay.js';
 import { h, icon } from './ui.js';
 
 const EMOTE_CDN = (id) => `https://static-cdn.jtvnw.net/emoticons/v2/${encodeURIComponent(id)}/default/dark/2.0`;
@@ -74,8 +75,11 @@ const STATUS_LABELS = {
  * @param {Function} o.auth          () => ctx.auth (fresh read)
  * @param {Function} o.requestLogin  open the login modal; resolves when it closes
  * @param {string} [o.embedSrc]      official Twitch embed URL (read-only fallback)
+ * @param {{videoId:string, getTime:()=>number}} [o.replay]
+ *        VOD chat replay: messages are fetched from /api/vod/:id/chat and shown as
+ *        the video's playback position reaches them. No login, no sending.
  */
-export function createChatPanel({ login, displayName, auth, requestLogin, embedSrc }) {
+export function createChatPanel({ login, displayName, auth, requestLogin, embedSrc, replay }) {
   const channel = String(login || '').toLowerCase();
 
   // ---- skeleton ----
@@ -490,15 +494,41 @@ export function createChatPanel({ login, displayName, auth, requestLogin, embedS
     limitEl.textContent = left >= 0 ? `${left}` : '0';
   });
 
+  // ---- VOD replay ----
+  let driver = null;
+  function startReplay() {
+    inputRow.hidden = true;
+    msgs.setAttribute('aria-label', `Chat replay for ${displayName || channel}`);
+    const paintReplay = (state, message) => {
+      dot.className = `chat-dot ${state === 'ready' ? 'ok' : state === 'error' ? 'err' : 'warn pulse'}`;
+      statusText.textContent = state === 'ready' ? 'Chat replay' : state === 'error' ? 'Replay unavailable' : 'Loading chat…';
+      if (state === 'error' && !replayErrShown) { replayErrShown = true; sysLine(message || 'Could not load chat replay.', 'err'); }
+      if (state === 'ready') replayErrShown = false;
+    };
+    let replayErrShown = false;
+    driver = createReplayDriver({
+      fetchPage: (q) => api(`/api/vod/${encodeURIComponent(replay.videoId)}/chat?${q.cursor ? `cursor=${encodeURIComponent(q.cursor)}` : `offset=${Math.floor(q.offset)}`}`),
+      getTime: replay.getTime,
+      onReset: () => { msgs.replaceChildren(); rendered = []; nameById.clear(); pinned = true; pendingNew = 0; newPill.hidden = true; },
+      onMessages: (list) => list.forEach((m) => addMessage(m)),
+      onStatus: paintReplay,
+    });
+    loadEmotes(); // BTTV/7TV need a login (Helix lookup); silently skipped without one
+    driver.start();
+  }
+
   // ---- boot ----
-  if ((auth()?.loggedIn ?? false) && (auth()?.canChat ?? true) !== false) connect();
+  if (replay) startReplay();
+  else if ((auth()?.loggedIn ?? false) && (auth()?.canChat ?? true) !== false) connect();
   else showGate();
 
   return {
     el: root,
     channel,
+    key: replay ? `vod:${replay.videoId}` : channel,
     destroy() {
       destroyed = true;
+      driver?.destroy();
       clearInterval(loginPoll);
       clearTimeout(retryTimer);
       destroyStream();
