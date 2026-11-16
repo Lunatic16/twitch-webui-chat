@@ -8,7 +8,7 @@ import { api, ApiError, supportedCodecs } from './api.js';
 import { sleep } from './ui.js';
 
 // "Go live" lands this many seconds behind the newest segment (hls.js' own live sync point is ~6-9 s back).
-const LIVE_EDGE_OFFSET = 2.5;
+const LIVE_EDGE_OFFSET = 1.5;
 
 const Hls = window.Hls;
 const all = new Set();
