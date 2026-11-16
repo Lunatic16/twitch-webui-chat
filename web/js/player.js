@@ -7,6 +7,9 @@
 import { api, ApiError, supportedCodecs } from './api.js';
 import { sleep } from './ui.js';
 
+// "Go live" lands this many seconds behind the newest segment (hls.js' own live sync point is ~6-9 s back).
+const LIVE_EDGE_OFFSET = 2.5;
+
 const Hls = window.Hls;
 const all = new Set();
 window.addEventListener('pagehide', () => all.forEach((p) => { p.flushProgress(); p.releaseSession(); }));
@@ -228,12 +231,17 @@ export class StreamPlayer extends EventTarget {
   play() { this.paused = false; return this.video.play().catch(() => {}); }
   togglePause() { return this.video.paused ? this.play() : this.pause(); }
 
+  /** Seek to (almost) the live edge: LIVE_EDGE_OFFSET seconds behind the newest data in the playlist. */
   jumpToLive() {
     const v = this.video;
     this.setDvr(false);
-    if (this.hls?.liveSyncPosition) v.currentTime = this.hls.liveSyncPosition;
-    else if (v.seekable.length) v.currentTime = v.seekable.end(v.seekable.length - 1) - 0.5;
-    else if (v.buffered.length) v.currentTime = v.buffered.end(v.buffered.length - 1) - 0.5;
+    const end = v.seekable.length ? v.seekable.end(v.seekable.length - 1)
+      : v.buffered.length ? v.buffered.end(v.buffered.length - 1)
+        : (this.hls?.liveSyncPosition ?? null);
+    if (end != null) {
+      const start = v.seekable.length ? v.seekable.start(0) : 0;
+      v.currentTime = Math.max(start, end - LIVE_EDGE_OFFSET);
+    }
     if (!this.paused) v.play().catch(() => {});
   }
 
