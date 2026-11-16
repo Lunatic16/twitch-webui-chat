@@ -232,7 +232,7 @@ Implemented in `server/chat.js` (IRC bridge + pure IRC parsing helpers), `server
 | `Esc` | exit fullscreen |
 | `?` | help |
 
-Watch page (single player): `Space`/`K` play-pause · `←`/`→` ±5 s · `J`/`L` ±10 s · `↑`/`↓` volume · `M` mute · `F` fullscreen · `T` theater · `End` live edge.
+Watch page (single player): `Space`/`K` play-pause · `←`/`→` ±5 s · `J`/`L` ±10 s · `↑`/`↓` volume · `M` mute · `F` fullscreen · `T` theater · `End` live edge (lands ~2.5 s behind the newest segment).
 
 ## 🔌 API
 
