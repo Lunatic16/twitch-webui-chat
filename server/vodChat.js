@@ -78,5 +78,5 @@ export function parseComments(data, opts = {}) {
   const edges = Array.isArray(conn?.edges) ? conn.edges : [];
   const messages = edges.map((e) => commentToChat(e?.node, opts)).filter(Boolean);
   const cursor = edges.length ? (edges[edges.length - 1]?.cursor ?? null) : null;
-  return { messages, cursor, hasNext: !!conn?.pageInfo?.hasNextPage && !!cursor, found: !!data?.video };
+  return { messages, cursor, hasNext: conn?.pageInfo?.hasNextPage !== false && !!cursor, found: !!data?.video };
 }

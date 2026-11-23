@@ -61,34 +61,42 @@ export function createReplayDriver({
 
   function fill() {
     if (filling || destroyed || now() < retryAt) return filling;
-    if (!hasNext && now() < pollAt) return filling;
+    if (now() < pollAt) return filling;
     const mine = epoch;
-    filling = (async () => {
+    const run = (async () => {
       try {
         for (let i = 0; i < maxPagesPerFill; i++) {
           const ahead = buffer.length ? buffer[buffer.length - 1].offset - lastT : -1;
           if (ahead >= leadSeconds) break;
-          // Follow the cursor while there is more; once exhausted, re-ask from the newest offset seen.
-          const page = await fetchPage(hasNext && cursor ? { cursor } : { offset: Math.max(fromOffset, lastSeenOffset) });
+          // Follow the cursor while there is one; otherwise re-ask from just past the newest offset seen.
+          const page = await fetchPage(cursor ? { cursor } : { offset: Math.max(fromOffset, lastSeenOffset) });
           if (mine !== epoch || destroyed) return;
+          let added = 0;
           for (const m of page.messages ?? []) {
             const k = keyOf(m);
-            if (!seen.has(k)) { seen.add(k); buffer.push(m); }
+            if (!seen.has(k)) { seen.add(k); buffer.push(m); added++; }
+            lastSeenOffset = Math.max(lastSeenOffset, m.offset);
           }
-          for (const m of page.messages ?? []) lastSeenOffset = Math.max(lastSeenOffset, m.offset);
           buffer.sort((a, b) => a.offset - b.offset);
-          cursor = page.cursor ?? null;
-          hasNext = !!page.hasNext && !!cursor;
           onStatus('ready');
-          if (!hasNext) { pollAt = now() + pollMs; break; }
+          if (page.hasNext && page.cursor) { cursor = page.cursor; continue; }
+          // No cursor to follow. If this page still brought new chat, immediately re-ask from the
+          // newest offset seen (so a missing/odd hasNextPage can't throttle us to one page per
+          // poll); only when it brought nothing new are we at the end of the known chat: poll.
+          cursor = null;
+          if (!added) { pollAt = now() + pollMs; break; }
         }
       } catch (e) {
         if (mine === epoch && !destroyed) { retryAt = now() + retryMs; onStatus('error', e?.message || 'Chat replay failed'); }
-      } finally {
-        if (mine === epoch) filling = null;
       }
     })();
-    return filling;
+    // Clear the in-flight marker only after it has been assigned. When the buffer is
+    // already full the async body finishes synchronously, so clearing it from inside
+    // (a `finally` there) ran *before* the assignment and left `filling` stuck on a
+    // settled promise forever, which froze the replay once the first buffer drained.
+    filling = run;
+    run.finally(() => { if (filling === run) filling = null; });
+    return run;
   }
 
   function tick() {
@@ -101,8 +109,9 @@ export function createReplayDriver({
     const due = [];
     while (buffer.length && buffer[0].offset <= t) due.push(buffer.shift());
     if (due.length) {
-      onMessages(justReset && due.length > maxBacklog ? due.slice(-maxBacklog) : due);
+      const backlog = justReset;
       justReset = false;
+      onMessages(backlog && due.length > maxBacklog ? due.slice(-maxBacklog) : due, { backlog });
     }
     fill();
   }

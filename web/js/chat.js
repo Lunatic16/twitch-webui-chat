@@ -496,6 +496,20 @@ export function createChatPanel({ login, displayName, auth, requestLogin, embedS
 
   // ---- VOD replay ----
   let driver = null;
+  // Messages come due in small bursts (one driver tick at a time). Spread each burst over the
+  // tick interval so lines appear one by one like live chat instead of in chunks.
+  const PACE_WINDOW_MS = 250;
+  let pacedTimers = new Set();
+  function cancelPaced() { pacedTimers.forEach(clearTimeout); pacedTimers = new Set(); }
+  function paceMessages(list, backlog) {
+    if (backlog || list.length < 2 || document.hidden) { list.forEach((m) => addMessage(m)); return; }
+    const step = PACE_WINDOW_MS / list.length;
+    list.forEach((m, i) => {
+      if (i === 0) { addMessage(m); return; }
+      const t = setTimeout(() => { pacedTimers.delete(t); if (!destroyed) addMessage(m); }, i * step);
+      pacedTimers.add(t);
+    });
+  }
   function startReplay() {
     inputRow.hidden = true;
     msgs.setAttribute('aria-label', `Chat replay for ${displayName || channel}`);
@@ -509,8 +523,8 @@ export function createChatPanel({ login, displayName, auth, requestLogin, embedS
     driver = createReplayDriver({
       fetchPage: (q) => api(`/api/vod/${encodeURIComponent(replay.videoId)}/chat?${q.cursor ? `cursor=${encodeURIComponent(q.cursor)}` : `offset=${Math.floor(q.offset)}`}`),
       getTime: replay.getTime,
-      onReset: () => { msgs.replaceChildren(); rendered = []; nameById.clear(); pinned = true; pendingNew = 0; newPill.hidden = true; },
-      onMessages: (list) => list.forEach((m) => addMessage(m)),
+      onReset: () => { cancelPaced(); msgs.replaceChildren(); rendered = []; nameById.clear(); pinned = true; pendingNew = 0; newPill.hidden = true; },
+      onMessages: (list, info) => paceMessages(list, info?.backlog),
       onStatus: paintReplay,
     });
     loadEmotes(); // BTTV/7TV need a login (Helix lookup); silently skipped without one
@@ -529,6 +543,7 @@ export function createChatPanel({ login, displayName, auth, requestLogin, embedS
     destroy() {
       destroyed = true;
       driver?.destroy();
+      cancelPaced();
       clearInterval(loginPoll);
       clearTimeout(retryTimer);
       destroyStream();

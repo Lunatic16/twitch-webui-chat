@@ -267,7 +267,7 @@ test('replay starts a little before the position after a seek, and shows a cappe
   setTime(100); driver.tick(); await driver.idle(); // jump forward = seek
   setTime(100.1); driver.tick();
   assert.equal(out.resets, 2);                      // initial + seek
-  assert.deepEqual(out.calls.at(-1), { offset: 80 }); // 100 - 20 s backlog
+  assert.deepEqual(out.calls.find((c, i) => i >= 1 && c.offset >= 80), { offset: 80 }); // 100 - 20 s backlog
   assert.equal(out.shown.length, 10);               // capped, newest kept
   assert.equal(out.shown.at(-1).offset, many.at(-1).offset);
 });
@@ -306,7 +306,7 @@ test('replay dedupes by id and retries after an error', async () => {
   clock = 2000;
   setTime(0.5); driver.tick(); await driver.idle();
   setTime(2); driver.tick();
-  assert.equal(out.calls.length, 2);
+  assert.equal(out.calls.length, 3); // retry + one re-ask that found nothing new
   assert.equal(out.shown.length, 1); // duplicate dropped
 });
 
@@ -329,10 +329,20 @@ test('replay keeps polling after the known chat ends (VOD of a live stream)', as
   assert.deepEqual(out.shown.map((m) => m.offset), [1]);
   known = [msg(1), msg(5), msg(8)]; // chat grew
   clock = 500; setTime(2.5); driver.tick(); await driver.idle();
-  assert.equal(out.calls.length, 1); // not before pollMs
+  assert.equal(out.calls.length, 2); // not before pollMs
   clock = 1500; setTime(3); driver.tick(); await driver.idle();
-  assert.deepEqual(out.calls.at(-1), { offset: 1 });
+  assert.ok(out.calls.some((c, i) => i >= 2 && c.offset === 1)); // re-asked from the newest offset seen
   setTime(4); driver.tick();
   setTime(6); driver.tick();
   assert.ok(out.shown.some((m) => m.offset === 5)); // the newly grown chat is released as playback reaches it
+});
+
+test('replay keeps fetching when pages claim hasNext:false but chat continues (no one-page-per-poll throttle)', async () => {
+  const all = Array.from({ length: 200 }, (_, i) => msg(i * 0.5)); // 0..99.5, 2 msg/s
+  const { driver, out, setTime } = harness({
+    now: () => 0, pollMs: 5000,
+    pages: ({ offset = 0 }) => { const m = all.filter((x) => x.offset >= offset).slice(0, 20); return { messages: m, cursor: 'c', hasNext: false }; },
+  });
+  for (let t = 0; t <= 90; t += 0.25) { setTime(t); driver.tick(); await driver.idle(); }
+  assert.ok(out.shown.at(-1).offset >= 89, `last shown ${out.shown.at(-1)?.offset}`);
 });
